@@ -1013,6 +1013,7 @@ public class MediaCodecRendererTest {
 
     public TestRenderer(MediaCodecAdapter.Factory mediaCodecAdapterFactory) {
       super(
+          ApplicationProvider.getApplicationContext(),
           C.TRACK_TYPE_AUDIO,
           mediaCodecAdapterFactory,
           /* mediaCodecSelector= */ (mimeType, requiresSecureDecoder, requiresTunnelingDecoder) ->
@@ -1097,7 +1098,10 @@ public class MediaCodecRendererTest {
 
     @Override
     protected DecoderReuseEvaluation canReuseCodec(
-        MediaCodecInfo codecInfo, Format oldFormat, Format newFormat) {
+        MediaCodecInfo codecInfo,
+        Format oldFormat,
+        Format newFormat,
+        boolean isAdaptiveFormatChange) {
       return codecInfo.canReuseCodec(oldFormat, newFormat);
     }
   }

@@ -396,7 +396,8 @@ import java.util.function.IntConsumer;
               playerId,
               builder.playbackLooperProvider,
               preloadConfiguration,
-              frameMetadataListener);
+              frameMetadataListener,
+              builder.avoidLoadingWhileEnded);
       Looper playbackLooper = internalPlayer.getPlaybackLooper();
 
       volume = 1;
@@ -421,15 +422,22 @@ import java.util.function.IntConsumer;
 
       audioSessionIdState =
           new BackgroundThreadStateHandler<>(
-              AUDIO_SESSION_ID_UNSET,
-              playbackLooper,
-              applicationLooper,
+              /* initialState= */ AUDIO_SESSION_ID_UNSET,
+              /* backgroundLooper= */ playbackLooper,
+              /* foregroundLooper= */ applicationLooper,
               clock,
               /* onStateChanged= */ this::onAudioSessionIdChanged);
       audioSessionIdState.runInBackground(
-          () ->
-              audioSessionIdState.setStateInBackground(
-                  Util.generateAudioSessionIdV21(applicationContext)));
+          () -> {
+            int newAudioSessionId = Util.generateAudioSessionIdV21(applicationContext);
+            if (audioSessionIdState.get() != newAudioSessionId) {
+              audioSessionIdState.setStateInBackground(newAudioSessionId);
+              // Provide the audio session ID to the renderers on playback thread to prevent race
+              // condition with player preparation.
+              sendRendererMessage(TRACK_TYPE_AUDIO, MSG_SET_AUDIO_SESSION_ID, newAudioSessionId);
+              sendRendererMessage(TRACK_TYPE_VIDEO, MSG_SET_AUDIO_SESSION_ID, newAudioSessionId);
+            }
+          });
       audioBecomingNoisyManager =
           new AudioBecomingNoisyManager(
               builder.context, playbackLooper, builder.looper, componentListener, clock);
@@ -452,7 +460,7 @@ import java.util.function.IntConsumer;
             new StreamVolumeManager(
                 builder.context,
                 componentListener,
-                audioAttributes.getStreamType(),
+                audioAttributes.getVolumeControlStream(),
                 playbackLooper,
                 applicationLooper,
                 clock);
@@ -1578,7 +1586,7 @@ import java.util.function.IntConsumer;
       this.audioAttributes = newAudioAttributes;
       sendRendererMessage(TRACK_TYPE_AUDIO, MSG_SET_AUDIO_ATTRIBUTES, newAudioAttributes);
       if (streamVolumeManager != null) {
-        streamVolumeManager.setStreamType(newAudioAttributes.getStreamType());
+        streamVolumeManager.setStreamType(newAudioAttributes.getVolumeControlStream());
       }
       // Queue event only and flush after updating playWhenReady in case both events are triggered.
       listeners.queueEvent(
@@ -2680,7 +2688,6 @@ import java.util.function.IntConsumer;
     int currentIndex = getCurrentWindowIndexInternal(playbackInfo);
     long contentPositionMs = getContentPositionInternal(playbackInfo);
     Timeline oldTimeline = playbackInfo.timeline;
-    int currentMediaSourceCount = mediaSourceHolderSnapshots.size();
     pendingOperationAcks++;
     removeMediaSourceHolders(fromIndex, /* toIndexExclusive= */ toIndex);
     Timeline newTimeline = createMaskingTimeline();
@@ -2690,15 +2697,19 @@ import java.util.function.IntConsumer;
             newTimeline,
             getPeriodPositionUsAfterTimelineChanged(
                 oldTimeline, newTimeline, currentIndex, contentPositionMs));
-    // Player transitions to STATE_ENDED if the current index is part of the removed tail.
-    final boolean transitionsToEnded =
-        newPlaybackInfo.playbackState != STATE_IDLE
-            && newPlaybackInfo.playbackState != STATE_ENDED
-            && fromIndex < toIndex
-            && toIndex == currentMediaSourceCount
-            && currentIndex >= newPlaybackInfo.timeline.getWindowCount();
-    if (transitionsToEnded) {
-      newPlaybackInfo = maskPlaybackState(newPlaybackInfo, STATE_ENDED);
+    if (newPlaybackInfo.playbackState != STATE_IDLE
+        && newPlaybackInfo.playbackState != STATE_ENDED
+        && currentIndex >= fromIndex
+        && currentIndex < toIndex) {
+      // Check if we need to transition to STATE_ENDED after the current item was removed and no
+      // subsequent period can be found.
+      Object periodUid = playbackInfo.periodId.periodUid;
+      int resolvedWindowIndex =
+          ExoPlayerImplInternal.resolveSubsequentPeriod(
+              window, period, repeatMode, shuffleModeEnabled, periodUid, oldTimeline, newTimeline);
+      if (resolvedWindowIndex == C.INDEX_UNSET) {
+        newPlaybackInfo = maskPlaybackState(newPlaybackInfo, STATE_ENDED);
+      }
     }
     internalPlayer.removeMediaSources(fromIndex, toIndex, shuffleOrder);
     return newPlaybackInfo;
@@ -3158,7 +3169,8 @@ import java.util.function.IntConsumer;
     for (int i = fromIndex; i < toIndex; i++) {
       MediaSourceHolderSnapshot snapshot = mediaSourceHolderSnapshots.get(i);
       snapshot.updateTimeline(
-          new TimelineWithUpdatedMediaItem(snapshot.getTimeline(), mediaItems.get(i - fromIndex)));
+          TimelineWithUpdatedMediaItem.create(
+              snapshot.getTimeline(), mediaItems.get(i - fromIndex)));
     }
     Timeline newTimeline = createMaskingTimeline();
     PlaybackInfo newPlaybackInfo = playbackInfo.copyWithTimeline(newTimeline);

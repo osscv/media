@@ -717,6 +717,18 @@ import java.util.concurrent.TimeoutException;
       builder.putLong(MediaMetadataCompat.METADATA_KEY_YEAR, metadata.recordingYear);
     }
 
+    if (metadata.author != null) {
+      builder.putText(MediaMetadataCompat.METADATA_KEY_AUTHOR, metadata.author);
+    }
+
+    if (metadata.writer != null) {
+      builder.putText(MediaMetadataCompat.METADATA_KEY_WRITER, metadata.writer);
+    }
+
+    if (metadata.composer != null) {
+      builder.putText(MediaMetadataCompat.METADATA_KEY_COMPOSER, metadata.composer);
+    }
+
     if (mediaUri != null) {
       builder.putString(MediaMetadataCompat.METADATA_KEY_MEDIA_URI, mediaUri.toString());
     }
@@ -875,8 +887,12 @@ import java.util.concurrent.TimeoutException;
         return metadata.writer;
       case MediaMetadataCompat.METADATA_KEY_COMPOSER:
         return metadata.composer;
+      case MediaMetadataCompat.METADATA_KEY_AUTHOR:
+        return metadata.author;
       case MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE:
         return metadata.subtitle;
+      case MediaMetadataCompat.METADATA_KEY_DISPLAY_DESCRIPTION:
+        return metadata.description;
       default:
         return null;
     }
@@ -1353,17 +1369,16 @@ import java.util.concurrent.TimeoutException;
         || hasAction(actions, PlaybackStateCompat.ACTION_PLAY_PAUSE)) {
       playerCommandsBuilder.add(COMMAND_PLAY_PAUSE);
     }
-    if (hasAction(actions, PlaybackStateCompat.ACTION_PREPARE)) {
-      playerCommandsBuilder.add(COMMAND_PREPARE);
+    if (hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID)
+        || hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH)
+        || hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_URI)) {
+      playerCommandsBuilder.add(COMMAND_SET_MEDIA_ITEM);
     }
-    if ((hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID)
-            && hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID))
-        || (hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH)
-            && hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH))
-        || (hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_URI)
-            && hasAction(actions, PlaybackStateCompat.ACTION_PLAY_FROM_URI))) {
-      // Require both PREPARE and PLAY actions as we have no logic to handle having just one action.
-      playerCommandsBuilder.addAll(COMMAND_SET_MEDIA_ITEM, COMMAND_PREPARE);
+    if (hasAction(actions, PlaybackStateCompat.ACTION_PREPARE)
+        || hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID)
+        || hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH)
+        || hasAction(actions, PlaybackStateCompat.ACTION_PREPARE_FROM_URI)) {
+      playerCommandsBuilder.add(COMMAND_PREPARE);
     }
     if (hasAction(actions, PlaybackStateCompat.ACTION_REWIND)) {
       playerCommandsBuilder.add(COMMAND_SEEK_BACK);
@@ -1406,9 +1421,9 @@ import java.util.concurrent.TimeoutException;
         COMMAND_RELEASE);
     if ((sessionFlags & FLAG_HANDLES_QUEUE_COMMANDS) != 0) {
       playerCommandsBuilder.add(COMMAND_CHANGE_MEDIA_ITEMS);
-      if (hasAction(actions, PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM)) {
-        playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_MEDIA_ITEM);
-      }
+    }
+    if (hasAction(actions, PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM)) {
+      playerCommandsBuilder.add(Player.COMMAND_SEEK_TO_MEDIA_ITEM);
     }
     if (isSessionReady) {
       if (hasAction(actions, PlaybackStateCompat.ACTION_SET_REPEAT_MODE)) {

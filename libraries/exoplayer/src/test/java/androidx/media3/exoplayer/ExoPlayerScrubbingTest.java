@@ -20,6 +20,7 @@ import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.o
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.sample;
 import static androidx.media3.test.utils.FakeTimeline.TimelineWindowDefinition.DEFAULT_WINDOW_DURATION_US;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
+import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.play;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.AdditionalAnswers.delegatesTo;
@@ -323,6 +324,7 @@ public final class ExoPlayerScrubbingTest {
 
     player.setVideoFrameMetadataListener(videoFrameMetadataListener);
 
+    player.pause();
     player.setScrubbingModeEnabled(true);
     advance(player).untilPendingCommandsAreFullyHandled();
     player.seekTo(0, 2000);
@@ -332,7 +334,7 @@ public final class ExoPlayerScrubbingTest {
     // The 2000 and 3000 seeks should be dropped.
     advance(player).untilBackgroundThreadCondition(() -> frameRenderCounter.get() > 0);
     player.clearVideoFrameMetadataListener(videoFrameMetadataListener);
-    advance(player).untilState(Player.STATE_ENDED);
+    play(player).untilState(Player.STATE_ENDED);
     player.release();
     surface.release();
 
@@ -429,8 +431,8 @@ public final class ExoPlayerScrubbingTest {
     player.seekTo(20_000L);
     player.seekTo(30_000L);
 
-    // TODO: After implementing ignore for intermittent seeks, the 10s seek will also be completed.
-    advance(player).untilBackgroundThreadCondition(() -> renderedBitmaps.size() > 1);
+    // Wait for 10s and 30s seeks to complete.
+    advance(player).untilBackgroundThreadCondition(() -> renderedBitmaps.size() > 2);
 
     player.seekTo(40_000L);
     player.seekTo(50_000L);
@@ -442,10 +444,10 @@ public final class ExoPlayerScrubbingTest {
     player.release();
     surface.release();
 
-    // TODO: After implementing ignore for intermittent seeks, renderedBitmaps should have size 4.
-    assertThat(renderedBitmaps).hasSize(3);
-    assertThat(renderedBitmaps.get(1).first).isEqualTo(30_000_000L);
-    assertThat(renderedBitmaps.get(2).first).isEqualTo(50_000_000L);
+    assertThat(renderedBitmaps).hasSize(4);
+    assertThat(renderedBitmaps.get(1).first).isEqualTo(10_000_000L);
+    assertThat(renderedBitmaps.get(2).first).isEqualTo(30_000_000L);
+    assertThat(renderedBitmaps.get(3).first).isEqualTo(50_000_000L);
 
     // Confirm every seek request still resulted in a position discontinuity callback.
     ArgumentCaptor<PositionInfo> newPositionCaptor = ArgumentCaptor.forClass(PositionInfo.class);
@@ -458,9 +460,8 @@ public final class ExoPlayerScrubbingTest {
         .containsExactly(10_000L, 20_000L, 30_000L, 40_000L, 50_000L)
         .inOrder();
 
-    // TODO: After implementing ignore for intermittent seeks, an onDroppedSeeksWhileScrubbing event
-    // will be reported.
-    verify(mockAnalyticsListener, never()).onDroppedSeeksWhileScrubbing(any(), anyInt());
+    // Check the dropped 20000 and 40000 seeks are reported.
+    verify(mockAnalyticsListener).onDroppedSeeksWhileScrubbing(any(), eq(2));
   }
 
   @Test

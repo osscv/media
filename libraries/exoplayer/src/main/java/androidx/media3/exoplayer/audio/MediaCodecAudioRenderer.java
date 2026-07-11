@@ -141,6 +141,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   private boolean allowPositionDiscontinuity;
   private boolean audioSinkNeedsReset;
   private boolean hasPendingReportedSkippedSilence;
+  private boolean hasReportedAudioPositionAdvancing;
   private int rendererPriority;
   private boolean isStarted;
   private long nextBufferToWritePresentationTimeUs;
@@ -311,6 +312,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       AudioSink audioSink,
       @Nullable LoudnessCodecController loudnessCodecController) {
     super(
+        context.getApplicationContext(),
         C.TRACK_TYPE_AUDIO,
         codecAdapterFactory,
         mediaCodecSelector,
@@ -323,7 +325,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     rendererPriority = C.PRIORITY_PLAYBACK;
     eventDispatcher = new EventDispatcher(eventHandler, eventListener);
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
-    audioSink.setListener(new AudioSinkListener());
   }
 
   @Override
@@ -372,13 +373,13 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     // Check whether the first decoder supports the format. This is the preferred decoder for the
     // format's MIME type, according to the MediaCodecSelector.
     MediaCodecInfo decoderInfo = decoderInfos.get(0);
-    boolean isFormatSupported = decoderInfo.isFormatSupported(format);
+    boolean isFormatSupported = decoderInfo.isFormatSupported(context, format);
     boolean isPreferredDecoder = true;
     if (!isFormatSupported) {
       // Check whether any of the other decoders support the format.
       for (int i = 1; i < decoderInfos.size(); i++) {
         MediaCodecInfo otherDecoderInfo = decoderInfos.get(i);
-        if (otherDecoderInfo.isFormatSupported(format)) {
+        if (otherDecoderInfo.isFormatSupported(context, format)) {
           decoderInfo = otherDecoderInfo;
           isFormatSupported = true;
           isPreferredDecoder = false;
@@ -430,7 +431,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       MediaCodecSelector mediaCodecSelector, Format format, boolean requiresSecureDecoder)
       throws DecoderQueryException {
     return MediaCodecUtil.getDecoderInfosSortedByFormatSupport(
-        getDecoderInfos(mediaCodecSelector, format, requiresSecureDecoder, audioSink), format);
+        context,
+        getDecoderInfos(mediaCodecSelector, format, requiresSecureDecoder, audioSink),
+        format);
   }
 
   /**
@@ -507,7 +510,10 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
   @Override
   protected DecoderReuseEvaluation canReuseCodec(
-      MediaCodecInfo codecInfo, Format oldFormat, Format newFormat) {
+      MediaCodecInfo codecInfo,
+      Format oldFormat,
+      Format newFormat,
+      boolean isAdaptiveFormatChange) {
     DecoderReuseEvaluation evaluation = codecInfo.canReuseCodec(oldFormat, newFormat);
 
     @DecoderDiscardReasons int discardReasons = evaluation.discardReasons;
@@ -547,9 +553,11 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
           : DEFAULT_DURATION_TO_PROGRESS_US;
     }
     long audioTrackBufferDurationUs = audioSink.getAudioTrackBufferSizeUs();
-    if (!audioSinkBufferFull || audioTrackBufferDurationUs == C.TIME_UNSET) {
-      // If the AudioSink buffer is not yet full or getting the audio track buffer size is
-      // unsupported, continue calling with default duration to progress.
+    if (!hasReportedAudioPositionAdvancing
+        || !audioSinkBufferFull
+        || audioTrackBufferDurationUs == C.TIME_UNSET) {
+      // If audio has not yet advanced, the AudioSink buffer is not yet full, or getting the audio
+      // track buffer size is unsupported, continue calling with default duration to progress.
       return DEFAULT_DURATION_TO_PROGRESS_US;
     }
     // Compare written, yet-to-play content duration against the audio track buffer size.
@@ -560,8 +568,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
             (bufferedDurationUs
                 / (getPlaybackParameters() != null ? getPlaybackParameters().speed : 1.0f)
                 / 2);
-    // Account for the elapsed time since the start of this iteration of the rendering loop.
-    bufferedDurationUs -= Util.msToUs(getClock().elapsedRealtime()) - elapsedRealtimeUs;
     return max(DEFAULT_DURATION_TO_PROGRESS_US, bufferedDurationUs);
   }
 
@@ -701,6 +707,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     }
     audioSink.setPlayerId(getPlayerId());
     audioSink.setClock(getClock());
+    audioSink.setListener(new AudioSinkListener());
   }
 
   @Override
@@ -713,6 +720,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     currentPositionUs = positionUs;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     hasPendingReportedSkippedSilence = false;
+    hasReportedAudioPositionAdvancing = false;
     allowPositionDiscontinuity = true;
   }
 
@@ -729,6 +737,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     isStarted = false;
     audioSink.pause();
     super.onStopped();
+    hasReportedAudioPositionAdvancing = false;
   }
 
   @Override
@@ -736,6 +745,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     audioSinkNeedsReset = true;
     inputFormat = null;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
+    hasReportedAudioPositionAdvancing = false;
     try {
       audioSink.flush();
     } finally {
@@ -750,6 +760,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   @Override
   protected void onReset() {
     hasPendingReportedSkippedSilence = false;
+    hasReportedAudioPositionAdvancing = false;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     try {
       super.onReset();
@@ -1082,6 +1093,26 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     if (SDK_INT >= 35) {
       mediaFormat.setInteger(MediaFormat.KEY_IMPORTANCE, max(0, -rendererPriority));
     }
+
+    if (Objects.equals(format.sampleMimeType, MimeTypes.AUDIO_IAMF)) {
+      // IAMF can support many different output Layouts, which are communicated to the Media Codec
+      // (IAMF Codec2 software decoder) as a channel mask.  We want to choose one appropriate
+      // for the current audio output configuration.
+      AudioCapabilities audioCapabilities = audioSink.getAudioCapabilities();
+      if (audioCapabilities == null) {
+        Log.w(
+            TAG,
+            "AudioCapabilities from the AudioSink are null, using default stereo output layout.");
+        mediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, AudioFormat.CHANNEL_OUT_STEREO);
+        mediaFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, 2);
+      } else {
+        int channelMask = IamfUtil.getOutputChannelMaskForCurrentConfiguration(audioCapabilities);
+        int channelCount = Integer.bitCount(channelMask);
+        mediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, channelMask);
+        mediaFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, channelCount);
+      }
+    }
+
     applyCodecParametersToMediaFormat(mediaFormat);
     return mediaFormat;
   }
@@ -1170,6 +1201,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     @Override
     public void onPositionAdvancing(long playoutStartSystemTimeMs) {
+      hasReportedAudioPositionAdvancing = true;
       eventDispatcher.positionAdvancing(playoutStartSystemTimeMs);
     }
 

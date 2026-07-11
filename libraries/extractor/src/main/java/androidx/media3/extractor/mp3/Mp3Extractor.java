@@ -27,7 +27,6 @@ import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.util.Log;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -176,7 +175,8 @@ public final class Mp3Extractor implements Extractor {
 
   private int synchronizedHeaderData;
 
-  @Nullable private Metadata metadata;
+  @Nullable private Metadata id3Metadata;
+  @Nullable private Metadata xingMetadata;
   private long basisTimeUs;
   private long samplesRead;
   private long firstSamplePosition;
@@ -293,6 +293,15 @@ public final class Mp3Extractor implements Extractor {
     if (seeker == null) {
       seeker = computeSeeker(input);
       extractorOutput.seekMap(seeker);
+      Metadata metadata;
+      if (id3Metadata != null && (flags & FLAG_DISABLE_ID3_METADATA) == 0) {
+        metadata =
+            xingMetadata != null
+                ? id3Metadata.copyWithAppendedEntriesFrom(xingMetadata)
+                : id3Metadata;
+      } else {
+        metadata = xingMetadata;
+      }
       Format.Builder format =
           new Format.Builder()
               .setContainerMimeType(MimeTypes.AUDIO_MPEG)
@@ -302,7 +311,7 @@ public final class Mp3Extractor implements Extractor {
               .setSampleRate(synchronizedHeader.sampleRate)
               .setEncoderDelay(gaplessInfoHolder.encoderDelay)
               .setEncoderPadding(gaplessInfoHolder.encoderPadding)
-              .setMetadata((flags & FLAG_DISABLE_ID3_METADATA) != 0 ? null : metadata);
+              .setMetadata(metadata);
       if (seeker.getAverageBitrate() != C.RATE_UNSET_INT) {
         format.setAverageBitrate(seeker.getAverageBitrate());
       }
@@ -388,9 +397,9 @@ public final class Mp3Extractor implements Extractor {
       boolean parseAllId3Frames = (flags & FLAG_DISABLE_ID3_METADATA) == 0;
       Id3Decoder.FramePredicate id3FramePredicate =
           parseAllId3Frames ? null : REQUIRED_ID3_FRAME_PREDICATE;
-      metadata = id3Peeker.peekId3Data(input, id3FramePredicate, MAX_SEARCH_BYTES);
-      if (metadata != null) {
-        gaplessInfoHolder.setFromMetadata(metadata);
+      id3Metadata = id3Peeker.peekId3Data(input, id3FramePredicate, MAX_SEARCH_BYTES);
+      if (id3Metadata != null) {
+        gaplessInfoHolder.setFromMetadata(id3Metadata);
       }
       peekedId3Bytes = (int) input.getPeekPosition();
       if (!sniffing) {
@@ -475,7 +484,7 @@ public final class Mp3Extractor implements Extractor {
     // Read past any seek frame and set the seeker based on metadata or a seek frame. Metadata
     // takes priority as it can provide greater precision.
     Seeker seekFrameSeeker = maybeReadSeekFrame(input);
-    Seeker metadataSeeker = maybeHandleSeekMetadata(metadata, input.getPosition());
+    Seeker metadataSeeker = maybeHandleSeekMetadata(id3Metadata, input.getPosition());
 
     if (disableSeeking) {
       return new UnseekableSeeker();
@@ -583,25 +592,15 @@ public final class Mp3Extractor implements Extractor {
           gaplessInfoHolder.encoderDelay = xingFrame.encoderDelay;
           gaplessInfoHolder.encoderPadding = xingFrame.encoderPadding;
         }
+        xingMetadata = xingFrame.getMetadata();
         long startPosition = input.getPosition();
-        if (input.getLength() != C.LENGTH_UNSET
-            && xingFrame.dataSize != C.LENGTH_UNSET
-            && input.getLength() != startPosition + xingFrame.dataSize) {
-          Log.i(
-              TAG,
-              "Data size mismatch between stream ("
-                  + input.getLength()
-                  + ") and Xing frame ("
-                  + (startPosition + xingFrame.dataSize)
-                  + "), using Xing value.");
-        }
         input.skipFully(synchronizedHeader.frameSize);
         // An Xing frame indicates the file is VBR (so we have to use the seek header for seeking)
         // while an Info header indicates the file is CBR, in which case ConstantBitrateSeeker will
         // give more accurate seeking than the low-resolution seek table in the Info header. We can
         // still use the length from the Info frame if we don't know the stream length directly.
         if (seekHeader == SEEK_HEADER_XING) {
-          seeker = XingSeeker.create(xingFrame, startPosition);
+          seeker = XingSeeker.create(xingFrame, startPosition, input.getLength());
         } else { // seekHeader == SEEK_HEADER_INFO
           seeker = getConstantBitrateSeeker(startPosition, xingFrame, input.getLength());
         }
